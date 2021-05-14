@@ -8,8 +8,7 @@ defmodule Native.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # Starts a worker by calling: Native.Worker.start_link(arg)
-      # {Native.Worker, arg}
+      Native.Server
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

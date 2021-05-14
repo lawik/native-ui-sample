@@ -1,6 +1,5 @@
 # Native
 
-**TODO: Add description**
 
 ## Installation
 
