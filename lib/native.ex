@@ -25,15 +25,19 @@ defmodule Native do
     text_id = System.unique_integer([:positive, :monotonic])
     text = :wxTextCtrl.new(panel, text_id, pos: {0, 32})
 
-    editor_id = System.unique_integer([:positive, :monotonic])
-    editor = :wxStyledTextCtrl.new(panel, id: editor_id, pos: {0, 72})
+    editor_a_id = System.unique_integer([:positive, :monotonic])
+    editor_a = :wxStyledTextCtrl.new(panel, id: editor_a_id, pos: {0, 72})
+    :wxEvtHandler.connect(editor_a, :stc_modified, id: editor_a_id)
+
+    editor_b_id = System.unique_integer([:positive, :monotonic])
+    editor_b = :wxStyledTextCtrl.new(panel, id: editor_b_id, pos: {128, 72})
+    :wxEvtHandler.connect(editor_b, :stc_modified, id: editor_b_id)
     #:wxEvtHandler.connect(editor, :stc_change, id: editor_id)
-    :wxEvtHandler.connect(editor, :stc_modified, id: editor_id)
     #:wxEvtHandler.connect(editor, :stc_charadded, id: editor_id)
 
     :wxFrame.show(frame)
 
-    state = %{panel: panel, frame: frame, button: button, text: text, editor: editor, delta: []}
+    state = %{panel: panel, frame: frame, button: button, text: text, editor_a: editor_a, editor_b: editor_b, delta_a: TextDelta.new(), delta_b: TextDelta.new(), document: TextDelta.new(), last_text: nil, last_editor: nil}
     {frame, state}
   end
 
@@ -50,37 +54,76 @@ defmodule Native do
     # :wxButton.destroy(ref)
     text_line = :wxTextCtrl.getLineText(state.text, 0)
     :wxButton.setLabel(state.button, text_line)
-    text = :wxStyledTextCtrl.getText(state.editor)
-    IO.puts(to_string(text))
+    #text = :wxStyledTextCtrl.getText(state.editor)
     {:noreply, state}
   end
 
-  def handle_event({:wx, _, ref, _, {:wxStyledText, :stc_modified, pos, _, _, flags, text, length, _, _, _, _, _, _, _, _, _, _, _, _, _, _}}, %{delta: delta} = state) do
-    op = case <<flags>> do
-      # Insert, 0x01
-      <<_::7, 1::1>> <> _ ->
-        :insert
-      # Delete, 0x02
-      <<_::6, 1::1, 0::1>> <> _ ->
-        :delete
-      _bin_flags ->
-        # <<i1::1, i2::1, i3::1, i4::1, i5::1, i6::1, i7::1, i8::1>> = bin_flags
-        # IO.inspect({i1, i2, i3, i4, i5, i6, i7, i8})
-        # IO.inspect(byte_size(bin_flags))
-        # IO.inspect(bin_flags)
-        # IO.inspect({flags, as_binary(flags)})
-        :nothing
-    end
+  def handle_event({:wx, _, ref, _, {:wxStyledText, :stc_modified, pos, _, _, flags, text, length, _, _, _, _, _, _, _, _, _, _, _, _, _, _}}, %{document: document} = state) do
+    if state.last_text == text and state.last_editor != ref do
+      {:noreply, state}
+    else
+      last_pos = :wxStyledTextCtrl.getCurrentPos(ref)
+      {current_delta, other_delta, other_editor} = if ref == state.editor_a do
+        {state.delta_a, state.delta_b, state.editor_b}
+      else
+        {state.delta_b, state.delta_a, state.editor_a}
+      end
 
-    case {op, delta} do
-      # More of the same operation, add them together
-      {op, [%{op: ^op} = latest | _]} -> %{latest | }
-      # No operation started, start it
-      {op, []} -> %{}
-      # Change of operations, start a new one
-    end
+      other_last_pos = :wxStyledTextCtrl.getCurrentPos(other_editor)
 
-    {:noreply, state}
+      op = case <<flags>> do
+        # Insert, 0x01
+        <<_::7, 1::1>> <> _ ->
+          IO.inspect({:insert, text, length, pos})
+          :insert
+
+        # Delete, 0x02
+        <<_::6, 1::1, 0::1>> <> _ ->
+          IO.inspect({:delete, text, length, pos})
+          :delete
+
+        _bin_flags ->
+          # <<i1::1, i2::1, i3::1, i4::1, i5::1, i6::1, i7::1, i8::1>> = bin_flags
+          # IO.inspect({i1, i2, i3, i4, i5, i6, i7, i8})
+          # IO.inspect(byte_size(bin_flags))
+          # IO.inspect(bin_flags)
+          # IO.inspect({flags, as_binary(flags)})
+          :nothing
+      end
+
+      change = if pos > 0 do
+        TextDelta.retain(TextDelta.new(), pos)
+      else
+        TextDelta.new()
+      end
+
+      change = case op do
+        :insert ->
+          TextDelta.insert(change, text)
+        :delete ->
+          TextDelta.delete(change, length)
+        :nothing ->
+          change
+      end
+
+      {:ok, document} = state.document
+      |> IO.inspect(label: "doc before")
+      |> TextDelta.apply(change)
+      |> IO.inspect(label: "doc after")
+
+      new_text = document.ops
+                 |> Enum.map(fn %{insert: chars} ->
+                   chars
+                 end)
+                 |> Enum.reverse()
+                 |> Enum.join()
+                 |> IO.inspect()
+
+      :wxStyledTextCtrl.setText(other_editor, new_text)
+      :wxStyledTextCtrl.gotoPos(other_editor, other_last_pos)
+
+      {:noreply, %{state | document: document, last_text: new_text, last_editor: ref}}
+    end
   end
 
   # # Insert text
