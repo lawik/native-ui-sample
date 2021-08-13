@@ -5,6 +5,10 @@ defmodule Native do
   @title "Canvas Example"
   @size {600, 600}
 
+  @editors 3
+
+  import Bitwise
+
   def start_link() do
     :wx_object.start_link(__MODULE__, [], [])
   end
@@ -25,19 +29,18 @@ defmodule Native do
     text_id = System.unique_integer([:positive, :monotonic])
     text = :wxTextCtrl.new(panel, text_id, pos: {0, 32})
 
-    editor_a_id = System.unique_integer([:positive, :monotonic])
-    editor_a = :wxStyledTextCtrl.new(panel, id: editor_a_id, pos: {0, 72})
-    :wxEvtHandler.connect(editor_a, :stc_modified, id: editor_a_id)
+    editors = Enum.map(1..@editors, fn num ->
+      editor_id = System.unique_integer([:positive, :monotonic])
+      editor_ref = :wxStyledTextCtrl.new(panel, id: editor_id, pos: {0, 128*num})
+      :wxStyledTextCtrl.setModEventMask(editor_ref, 0x13)
+      :wxEvtHandler.connect(editor_ref, :stc_modified, id: editor_id)
+      editor_ref
+    end)
 
-    editor_b_id = System.unique_integer([:positive, :monotonic])
-    editor_b = :wxStyledTextCtrl.new(panel, id: editor_b_id, pos: {128, 72})
-    :wxEvtHandler.connect(editor_b, :stc_modified, id: editor_b_id)
-    #:wxEvtHandler.connect(editor, :stc_change, id: editor_id)
-    #:wxEvtHandler.connect(editor, :stc_charadded, id: editor_id)
 
     :wxFrame.show(frame)
 
-    state = %{panel: panel, frame: frame, button: button, text: text, editor_a: editor_a, editor_b: editor_b, delta_a: TextDelta.new(), delta_b: TextDelta.new(), document: TextDelta.new(), last_text: nil, last_editor: nil}
+    state = %{panel: panel, frame: frame, button: button, editors: editors, document: TextDelta.new(), last_events: %{}}
     {frame, state}
   end
 
@@ -59,71 +62,68 @@ defmodule Native do
   end
 
   def handle_event({:wx, _, ref, _, {:wxStyledText, :stc_modified, pos, _, _, flags, text, length, _, _, _, _, _, _, _, _, _, _, _, _, _, _}}, %{document: document} = state) do
-    if state.last_text == text and state.last_editor != ref do
-      {:noreply, state}
-    else
-      last_pos = :wxStyledTextCtrl.getCurrentPos(ref)
-      {current_delta, other_delta, other_editor} = if ref == state.editor_a do
-        {state.delta_a, state.delta_b, state.editor_b}
-      else
-        {state.delta_b, state.delta_a, state.editor_a}
+    IO.inspect(flags, base: :hex)
+    IO.inspect(flags, base: :binary)
+    op = if (flags &&& 0x10) != 0 do
+      if (flags &&& 0x1) != 0 do
+        IO.inspect({:insert, ref, text, length, pos})
+        send(self(), {:insert, ref, text, length, pos})
+
       end
-
-      other_last_pos = :wxStyledTextCtrl.getCurrentPos(other_editor)
-
-      op = case <<flags>> do
-        # Insert, 0x01
-        <<_::7, 1::1>> <> _ ->
-          IO.inspect({:insert, text, length, pos})
-          :insert
-
-        # Delete, 0x02
-        <<_::6, 1::1, 0::1>> <> _ ->
-          IO.inspect({:delete, text, length, pos})
-          :delete
-
-        _bin_flags ->
-          # <<i1::1, i2::1, i3::1, i4::1, i5::1, i6::1, i7::1, i8::1>> = bin_flags
-          # IO.inspect({i1, i2, i3, i4, i5, i6, i7, i8})
-          # IO.inspect(byte_size(bin_flags))
-          # IO.inspect(bin_flags)
-          # IO.inspect({flags, as_binary(flags)})
-          :nothing
+      if (flags &&& 0x2) != 0 do
+        IO.inspect({:delete, ref, text, length, pos})
+        send(self(), {:delete, ref, text, length, pos})
       end
-
-      change = if pos > 0 do
-        TextDelta.retain(TextDelta.new(), pos)
-      else
-        TextDelta.new()
-      end
-
-      change = case op do
-        :insert ->
-          TextDelta.insert(change, text)
-        :delete ->
-          TextDelta.delete(change, length)
-        :nothing ->
-          change
-      end
-
-      {:ok, document} = state.document
-      |> IO.inspect(label: "doc before")
-      |> TextDelta.apply(change)
-      |> IO.inspect(label: "doc after")
-
-      new_text = document.ops
-                 |> Enum.map(fn %{insert: chars} ->
-                   chars
-                 end)
-                 |> Enum.reverse()
-                 |> Enum.join()
-                 |> IO.inspect()
-
-      :wxStyledTextCtrl.setText(other_editor, new_text)
-      :wxStyledTextCtrl.gotoPos(other_editor, other_last_pos)
-
-      {:noreply, %{state | document: document, last_text: new_text, last_editor: ref}}
     end
+
+    {:noreply, state}
+
+#      change = if pos > 0 do
+#        TextDelta.retain(TextDelta.new(), pos)
+#      else
+#        TextDelta.new()
+#      end
+#
+#      change = case op do
+#        :insert ->
+#          TextDelta.insert(change, text)
+#        :delete ->
+#          TextDelta.delete(change, length)
+#        :nothing ->
+#          change
+#      end
+#      IO.inspect(ref, label: "current")
+#
+#      if change.ops != [] do
+#        {:ok, document} = state.document
+#        |> IO.inspect(label: "doc before")
+#        |> TextDelta.apply(change)
+#
+#        document
+#        |> IO.inspect(label: "doc after")
+#
+#        if state.document != document do
+#          new_text = document.ops
+#                     |> Enum.map(fn %{insert: chars} ->
+#                       chars
+#                     end)
+#                     |> Enum.reverse()
+#                     |> Enum.join()
+#                     |> IO.inspect(label: "text")
+#
+#          :wxStyledTextCtrl.setText(other_editor, new_text)
+#          :wxStyledTextCtrl.gotoPos(other_editor, other_last_pos)
+#          {:noreply, %{state | document: document, last_text: new_text, last_editor: ref}}
+#        else
+#          IO.puts("no change in doc")
+#          {:noreply, state}
+#        end
+#      else
+#        IO.puts("no ops")
+#        {:noreply, state}
+#      end
+#
+#    end
   end
 
   # # Insert text
@@ -152,6 +152,49 @@ defmodule Native do
     :wxDC.clear(dc)
     :wxPaintDC.destroy(dc)
     :ok
+  end
+
+  def handle_info({:insert, ref, text, length, pos} = event, state) do
+    last_event = state.last_events[ref]
+    case last_event do
+      {:insert, last_ref, ^text, ^length, ^pos} when ref != last_ref ->
+        last_events = Map.delete(state.last_events, ref)
+        {:noreply, %{state | last_events: last_events}}
+
+      _ ->
+        last_events = on_other_editors(ref, state.editors, fn editor, last_events ->
+          :wxStyledTextCtrl.insertText(editor, pos, text)
+          Map.put(last_events, editor, event)
+        end)
+        {:noreply, %{state | last_events: last_events}}
+    end
+  end
+
+  def handle_info({:delete, ref, text, length, pos} = event, state) do
+    last_event = state.last_events[ref]
+    case last_event do
+      {:delete, last_ref, _, _, _} when ref != last_ref ->
+        last_events = Map.delete(state.last_events, ref)
+        {:noreply, %{state | last_events: last_events}}
+
+      _ ->
+        last_events = on_other_editors(ref, state.editors, fn editor, last_events ->
+          position = :wxStyledTextCtrl.getCurrentPos(editor)
+          :wxStyledTextCtrl.setCurrentPos(editor, pos)
+          :wxStyledTextCtrl.deleteBack(editor)
+          :wxStyledTextCtrl.setCurrentPos(editor, position)
+          Map.put(last_events, editor, event)
+        end)
+        {:noreply, %{state | last_events: last_events}}
+    end
+  end
+
+  defp on_other_editors(ref, editors, callback) do
+    editors
+    |> Enum.filter(fn other_ref ->
+      ref != other_ref
+    end)
+    |> Enum.reduce(%{}, callback)
   end
 
   def as_binary(num) do
